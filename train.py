@@ -28,6 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
+from muon import Muon
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -54,6 +55,8 @@ n_head = 12
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
+# optimizer selection
+optimizer_name = 'adamw' # 'adamw', 'sgd', 'muon'
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -61,6 +64,10 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+# muon-specific hyperparameters
+muon_lr = 0.02 # learning rate for Muon on hidden weights
+muon_momentum = 0.95 # momentum for Muon
+muon_ns_steps = 5 # Newton-Schulz iterations
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
@@ -196,8 +203,28 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-if init_from == 'resume':
+if optimizer_name == 'adamw':
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+elif optimizer_name == 'sgd':
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
+elif optimizer_name == 'muon':
+    # Muon for hidden 2D weights, AdamW for embeddings/head/biases/layernorms
+    muon_params = []
+    adam_params = []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        # Use AdamW for: embeddings, lm_head, layernorms, biases, and 1D params
+        if 'wte' in name or 'wpe' in name or 'lm_head' in name or 'ln' in name or p.dim() < 2:
+            adam_params.append(p)
+        else:
+            muon_params.append(p)
+    print(f"Muon params: {sum(p.numel() for p in muon_params):,} | Adam params: {sum(p.numel() for p in adam_params):,}")
+    optimizer = torch.optim.AdamW(adam_params, lr=learning_rate, betas=(beta1, beta2), weight_decay=weight_decay)
+    muon_optimizer = Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps)
+else:
+    raise ValueError(f"Unknown optimizer: {optimizer_name}")
+if init_from == 'resume' and optimizer_name != 'muon':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
@@ -241,6 +268,14 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
     return min_lr + coeff * (learning_rate - min_lr)
 
+# CSV logging for experiment results
+import csv
+csv_log_file = os.path.join(out_dir, 'log.csv')
+if master_process:
+    with open(csv_log_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['iter', 'train_loss', 'val_loss', 'lr', 'step_time_ms', 'optimizer'])
+
 # logging
 if wandb_log and master_process:
     import wandb
@@ -258,11 +293,20 @@ while True:
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+    if optimizer_name == 'muon':
+        # scale muon LR with the same decay ratio
+        muon_lr_now = get_lr(iter_num) / learning_rate * muon_lr if decay_lr else muon_lr
+        for param_group in muon_optimizer.param_groups:
+            param_group['lr'] = muon_lr_now
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        # write to CSV
+        with open(csv_log_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([iter_num, f"{losses['train']:.4f}", f"{losses['val']:.4f}", f"{lr:.6f}", '', optimizer_name])
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -309,9 +353,13 @@ while True:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
+    if optimizer_name == 'muon':
+        muon_optimizer.step()
     scaler.update()
     # flush the gradients as soon as we can, no need for this memory anymore
     optimizer.zero_grad(set_to_none=True)
+    if optimizer_name == 'muon':
+        muon_optimizer.zero_grad(set_to_none=True)
 
     # timing and logging
     t1 = time.time()
@@ -325,6 +373,10 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        # log step time to CSV
+        with open(csv_log_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([iter_num, f"{lossf:.4f}", '', f"{lr:.6f}", f"{dt*1000:.2f}", optimizer_name])
     iter_num += 1
     local_iter_num += 1
 
