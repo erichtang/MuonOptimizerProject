@@ -28,7 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-from muon import Muon, LowRankMuon, InfrequentMuon
+from muon import Muon, LowRankMuon, InfrequentMuon, QRLowRankMuon
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -209,7 +209,7 @@ if optimizer_name == 'adamw':
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 elif optimizer_name == 'sgd':
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
-elif optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_name == 'infrequentmuon':
+elif optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_name == 'infrequentmuon'or optimizer_name == 'qrlowrankmuon':
     # Muon for hidden 2D weights, AdamW for embeddings/head/biases/layernorms
     muon_params = []
     adam_params = []
@@ -229,9 +229,11 @@ elif optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_na
         muon_optimizer = LowRankMuon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps, rank=muon_rank)
     elif optimizer_name == 'infrequentmuon':
         muon_optimizer = InfrequentMuon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps, update_freq=muon_update_freq)
+    elif optimizer_name == 'qrlowrankmuon':
+        muon_optimizer = QRLowRankMuon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps, rank=muon_rank)
 else:
     raise ValueError(f"Unknown optimizer: {optimizer_name}")
-if init_from == 'resume' and optimizer_name != 'muon' and optimizer_name != 'lowrankmuon' and optimizer_name != 'infrequentmuon':
+if init_from == 'resume' and optimizer_name != 'muon' and optimizer_name != 'lowrankmuon' and optimizer_name != 'infrequentmuon' and optimizer_name != 'qrlowrankmuon':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
@@ -300,7 +302,7 @@ while True:
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-    if optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_name == 'infrequentmuon':
+    if optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_name == 'infrequentmuon' or optimizer_name == 'qrlowrankmuon':
         # scale muon LR with the same decay ratio
         muon_lr_now = get_lr(iter_num) / learning_rate * muon_lr if decay_lr else muon_lr
         for param_group in muon_optimizer.param_groups:
@@ -360,12 +362,12 @@ while True:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
-    if optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_name == 'infrequentmuon':
+    if optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_name == 'infrequentmuon' or optimizer_name == 'qrlowrankmuon':
         muon_optimizer.step()
     scaler.update()
     # flush the gradients as soon as we can, no need for this memory anymore
     optimizer.zero_grad(set_to_none=True)
-    if optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_name == 'infrequentmuon':
+    if optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_name == 'infrequentmuon' or optimizer_name == 'qrlowrankmuon':
         muon_optimizer.zero_grad(set_to_none=True)
 
     # timing and logging

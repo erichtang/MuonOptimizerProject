@@ -151,7 +151,49 @@ class LowRankMuon(Muon):
 
         return loss
 
+class QRLowRankMuon(LowRankMuon):   
 
+    def generate_gaussian_sketch(self, param):
+        m, n = param.shape
+        # float32 required because torch.linalg.qr doesn't support bfloat16 on CUDA
+        return torch.randn(n, self.rank, device=param.device, dtype=torch.float32) / (n ** 0.5)
+ 
+    
+    def low_rank_approximation(self, param):
+        m,n = param.shape
+        transposed = False
+        if m>n:
+            param = param.T
+            transposed = True
+        sketch = self.generate_gaussian_sketch(param)
+        Y = param.float() @ sketch
+        Q, _ = torch.linalg.qr(Y)
+        Q = Q.bfloat16()
+        out = Q.T @ param.bfloat16()
+        return out, Q, transposed
+
+    def muon_update(self, grad, momentum_buf, beta=0.95, ns_steps=5, nesterov=True):
+        # if use_adaptive_rank:
+        #     rank = min(grad.shape[0]//4, 64)  
+        # else:
+        rank = self.rank  
+        momentum_buf.lerp_(grad, 1 - beta)
+        update = grad.lerp_(momentum_buf, beta) if nesterov else momentum_buf
+        if update.ndim == 4:  # conv filters: flatten last 3 dims
+            update = update.view(len(update), -1)
+        
+        low_rank_update, q_mat, transposed = self.low_rank_approximation(update)
+        low_rank_update = zeropower_via_newtonschulz5(low_rank_update, steps=ns_steps)
+        # low_rank_update *= max(1, low_rank_update.size(0) / low_rank_update.size(1)) ** 0.5
+        out = low_rank_update.T @ q_mat.T if transposed else q_mat @ low_rank_update
+        m, n = out.shape
+        out *= max(1, m/n) ** 0.5
+        return out
+
+#baseline with truncated SVD
+def pca_lowrank_msgn(M, rank):
+    U,S,V = torch.pca_lowrank(M, q=rank, niter=2)
+    return (U@V.T).bfloat16()
 
 class InfrequentMuon(torch.optim.Optimizer):
     """

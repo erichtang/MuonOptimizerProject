@@ -18,23 +18,43 @@ runs = [
     ('infrequentmuon', 'out-infrequentmuon'),
 ]
 
-for optimizer_name, out_dir in runs:
-    print(f"\n{'='*50}\nRunning {optimizer_name}\n{'='*50}")
+# for optimizer_name, out_dir in runs:
+#     print(f"\n{'='*50}\nRunning {optimizer_name}\n{'='*50}")
+#     subprocess.run([
+#         'python', 'train.py', 'config/train_shakespeare_char.py',
+#         f'--optimizer_name={optimizer_name}',
+#         f'--out_dir={out_dir}',
+#         '--device=cuda',
+#         '--compile=False',
+#         '--max_iters=2000',
+#         '--lr_decay_iters=2000', 
+#         '--eval_interval=100'
+#     ], check=True)
+
+ranks = [4]
+
+for rank in ranks:
+    print(f"\n{'='*50}\nRunning lowrankmuon rank={rank}\n{'='*50}")
     subprocess.run([
         'python', 'train.py', 'config/train_shakespeare_char.py',
-        f'--optimizer_name={optimizer_name}',
-        f'--out_dir={out_dir}',
+        '--optimizer_name=lowrankmuon',
+        f'--out_dir=out-lowrankmuon-r{rank}',
         '--device=cuda',
         '--compile=False',
         '--max_iters=2000',
-        '--lr_decay_iters=2000', 
-        '--eval_interval=200'
+        '--lr_decay_iters=2000',
+        '--eval_interval=100',
+        f'--muon_rank={rank}',
     ], check=True)
-
 # Load CSVs
 optimizers = {'adamw': 'out-adamw', 'sgd': 'out-sgd', 'muon': 'out-muon', 'lowrankmuon': 'out-lowrankmuon', 'infrequentmuon': 'out-infrequentmuon'}
 colors = {'adamw': '#1f77b4', 'sgd': '#ff7f0e', 'muon': '#2ca02c', 'lowrankmuon': '#d62728', 'infrequentmuon': '#9467bd'}
 labels = {'adamw': 'AdamW', 'sgd': 'SGD', 'muon': 'Muon', 'lowrankmuon': 'LowRankMuon', 'infrequentmuon': 'InfrequentMuon'}
+for rank in [4, 16, 32, 64, 85]:
+    name = f'lowrankmuon-r{rank}'
+    optimizers[name] = f'out-lowrankmuon-r{rank}'
+    colors[name] = {4: '#1f77b4', 16: '#9467bd', 32: '#8c564b', 64: '#e377c2', 85: '#1f77b4'}[rank]
+    labels[name] = f'LowRankMuon (r={rank})'
 
 dfs = {}
 for name, d in optimizers.items():
