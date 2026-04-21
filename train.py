@@ -209,7 +209,7 @@ if optimizer_name == 'adamw':
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 elif optimizer_name == 'sgd':
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
-elif optimizer_name == 'muon' or optimizer_name == 'lowrankmuon':
+elif optimizer_name == 'muon' or optimizer_name == 'lowrankmuon' or optimizer_name == 'infrequentmuon':
     # Muon for hidden 2D weights, AdamW for embeddings/head/biases/layernorms
     muon_params = []
     adam_params = []
