@@ -53,6 +53,7 @@ block_size = 1024
 n_layer = 12
 n_head = 12
 n_embd = 768
+muon_rank = 8  # Default global rank for LowRankMuon. 
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # optimizer selection
@@ -224,7 +225,7 @@ elif optimizer_name == 'muon' or optimizer_name == 'lowrankmuon':
     if optimizer_name == 'muon':
         muon_optimizer = Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps)
     elif optimizer_name == 'lowrankmuon':
-        muon_optimizer = LowRankMuon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps)
+        muon_optimizer = LowRankMuon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps, rank=muon_rank)
 else:
     raise ValueError(f"Unknown optimizer: {optimizer_name}")
 if init_from == 'resume' and optimizer_name != 'muon' and optimizer_name != 'lowrankmuon':
