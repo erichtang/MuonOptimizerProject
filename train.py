@@ -28,7 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-from muon import Muon
+from muon import Muon, LowRankMuon
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -207,7 +207,7 @@ if optimizer_name == 'adamw':
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 elif optimizer_name == 'sgd':
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
-elif optimizer_name == 'muon':
+elif optimizer_name == 'muon' or optimizer_name == 'lowrankmuon':
     # Muon for hidden 2D weights, AdamW for embeddings/head/biases/layernorms
     muon_params = []
     adam_params = []
@@ -221,10 +221,13 @@ elif optimizer_name == 'muon':
             muon_params.append(p)
     print(f"Muon params: {sum(p.numel() for p in muon_params):,} | Adam params: {sum(p.numel() for p in adam_params):,}")
     optimizer = torch.optim.AdamW(adam_params, lr=learning_rate, betas=(beta1, beta2), weight_decay=weight_decay)
-    muon_optimizer = Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps)
+    if optimizer_name == 'muon':
+        muon_optimizer = Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps)
+    elif optimizer_name == 'lowrankmuon':
+        muon_optimizer = LowRankMuon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, ns_steps=muon_ns_steps)
 else:
     raise ValueError(f"Unknown optimizer: {optimizer_name}")
-if init_from == 'resume' and optimizer_name != 'muon':
+if init_from == 'resume' and optimizer_name != 'muon' and optimizer_name != 'lowrankmuon':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
@@ -293,7 +296,7 @@ while True:
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-    if optimizer_name == 'muon':
+    if optimizer_name == 'muon' or optimizer_name == 'lowrankmuon':
         # scale muon LR with the same decay ratio
         muon_lr_now = get_lr(iter_num) / learning_rate * muon_lr if decay_lr else muon_lr
         for param_group in muon_optimizer.param_groups:
@@ -353,12 +356,12 @@ while True:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
-    if optimizer_name == 'muon':
+    if optimizer_name == 'muon' or optimizer_name == 'lowrankmuon':
         muon_optimizer.step()
     scaler.update()
     # flush the gradients as soon as we can, no need for this memory anymore
     optimizer.zero_grad(set_to_none=True)
-    if optimizer_name == 'muon':
+    if optimizer_name == 'muon' or optimizer_name == 'lowrankmuon':
         muon_optimizer.zero_grad(set_to_none=True)
 
     # timing and logging
