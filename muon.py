@@ -83,3 +83,73 @@ class Muon(torch.optim.Optimizer):
                 p.add_(update.reshape(p.shape), alpha=-group['lr'])
 
         return loss
+
+
+
+class LowRankMuon(Muon):
+ 
+    def __init__(self, params, lr=0.02, momentum=0.95, weight_decay=0.0,ns_steps=5, rank=8, use_adaptive_rank=False):
+        self.rank = rank
+        self.use_adaptive_rank = use_adaptive_rank
+        defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay, ns_steps=ns_steps, rank=rank, use_adaptive_rank=use_adaptive_rank)
+        super().__init__(params, defaults)
+
+    def generate_gaussian_sketch(self, param):
+        m,n = param.shape
+        sketch = torch.randn(n, self.rank, device=param.device, dtype=torch.bfloat16)/n**0.5
+        return sketch
+    
+    def low_rank_approximation(self, param):
+        m,n = param.shape
+        transposed = False
+        if m>n:
+            param = param.T
+            transposed = True
+        sketch = self.generate_gaussian_sketch(param)
+        Y = param @ sketch
+        return Y, sketch, transposed
+
+    def muon_update(self, grad, momentum_buf, beta=0.95, ns_steps=5, nesterov=True):
+        # if use_adaptive_rank:
+        #     rank = min(grad.shape[0]//4, 64)  
+        # else:
+        rank = self.rank  
+        momentum_buf.lerp_(grad, 1 - beta)
+        update = grad.lerp_(momentum_buf, beta) if nesterov else momentum_buf
+        if update.ndim == 4:  # conv filters: flatten last 3 dims
+            update = update.view(len(update), -1)
+        
+        update = update.bfloat16()  
+        low_rank_update, sketch, transposed = self.low_rank_approximation(update)
+        low_rank_update = zeropower_via_newtonschulz5(low_rank_update, steps=ns_steps)
+        # low_rank_update *= max(1, low_rank_update.size(0) / low_rank_update.size(1)) ** 0.5
+        out = low_rank_update @ sketch.T if not transposed else (low_rank_update @ sketch.T).T
+        m, n = out.shape
+        out *= max(1, m/n) ** 0.5
+        return out
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                state = self.state[p]
+                if len(state) == 0:
+                    state['momentum_buffer'] = torch.zeros_like(p)
+                update = self.muon_update(
+                    p.grad, state['momentum_buffer'],
+                    beta=group['momentum'], ns_steps=group['ns_steps']
+                )
+                p.mul_(1 - group['lr'] * group['weight_decay'])
+                p.add_(update.reshape(p.shape), alpha=-group['lr'])
+
+        return loss
+
+
+
